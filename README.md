@@ -14,6 +14,8 @@ combine.sh is a versatile bash script that recursively processes files in a dire
   - Image files (metadata only)
 - Customizable output file name
 - Configurable maximum file size for processing
+- Option to exclude specific directories
+- Proper handling of symlinks to prevent infinite loops
 - Verbose mode for detailed logging
 - Compatible with macOS and Linux
 
@@ -42,12 +44,13 @@ The script requires the following tools to be installed:
 Run the script in the directory you want to process:
 
 ```
-./combine.sh [-o output_file] [-s max_file_size] [-v] [-h] [-V]
+./combine.sh [-o output_file] [-s max_file_size] [-e exclude_dir] [-v] [-h] [-V]
 ```
 
 Options:
 - `-o output_file`: Specify the output file name (default: combined_output.md)
 - `-s max_file_size`: Set maximum file size to process in bytes (default: 10MB)
+- `-e exclude_dir`: Specify a directory to exclude (can be used multiple times)
 - `-v`: Enable verbose mode
 - `-h`: Display help message
 - `-V`: Display version information
@@ -67,6 +70,16 @@ Options:
 3. Set a custom maximum file size (e.g., 5MB) and enable verbose mode:
    ```
    ./combine.sh -s 5242880 -v
+   ```
+
+4. Exclude the 'node_modules' directory:
+   ```
+   ./combine.sh -e node_modules
+   ```
+
+5. Exclude multiple directories and enable verbose mode:
+   ```
+   ./combine.sh -e node_modules -e .git -v
    ```
 
 ## General Use Cases
