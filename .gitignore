@@ -1,0 +1,30 @@
+# Output files
+combined_output.md
+*.md
+
+# macOS system files
+.DS_Store
+
+# Editor-specific files
+.vscode/
+.idea/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+
+# Logs
+*.log
+
+# Dependency directories
+node_modules/
+vendor/
+
+# Build outputs
+dist/
+build/
+
+# Environment files
+.env
+.env.local
