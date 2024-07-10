@@ -2,25 +2,33 @@
 
 set -euo pipefail
 
-VERSION="1.1.2"
+VERSION="2.0.0"
 
 # Default settings
 output_file="combined_output.md"
+json_output_file=""
 full_output_path=""
 verbose=false
-max_file_size=$((10 * 1024 * 1024))  # 10 MB
+max_file_size=$((10 * 1024 * 1024)) # 10 MB
 exclude_dirs=()
+exclude_extensions=()
 processed_dirs=()
+respect_gitignore=false
+calculate_tokens=false
 
 # Function to display usage information
 usage() {
-    echo "Usage: $0 [-o output_file] [-s max_file_size] [-e exclude_dir] [-v] [-h] [-V]"
-    echo "  -o output_file    Specify the output file name (default: combined_output.md)"
-    echo "  -s max_file_size  Set maximum file size to process in bytes (default: 10MB)"
-    echo "  -e exclude_dir    Specify a directory to exclude (can be used multiple times)"
-    echo "  -v                Enable verbose mode"
-    echo "  -h                Display this help message"
-    echo "  -V                Display version information"
+    echo "Usage: $0 [-o output_file] [-j json_output] [-s max_file_size] [-e exclude_dir] [-x exclude_extension] [-v] [-h] [-V] [--gitignore] [--tokens]"
+    echo "  -o output_file      Specify the output Markdown file name (default: combined_output.md)"
+    echo "  -j json_output      Specify the output JSON file name (optional)"
+    echo "  -s max_file_size    Set maximum file size to process in bytes (default: 10MB)"
+    echo "  -e exclude_dir      Specify a directory to exclude (can be used multiple times)"
+    echo "  -x exclude_extension Specify a file extension to exclude (can be used multiple times)"
+    echo "  -v                  Enable verbose mode"
+    echo "  -h                  Display this help message"
+    echo "  -V                  Display version information"
+    echo "  --gitignore         Respect all .gitignore files when processing directories"
+    echo "  --tokens            Calculate and display token count for the output file"
     exit 1
 }
 
@@ -31,37 +39,52 @@ version() {
 }
 
 # Parse command-line options
-while getopts ":o:s:e:vhV" opt; do
-    case ${opt} in
-        o )
-            output_file=$OPTARG
-            ;;
-        s )
-            max_file_size=$OPTARG
-            ;;
-        e )
-            exclude_dirs+=("$OPTARG")
-            ;;
-        v )
-            verbose=true
-            ;;
-        h )
-            usage
-            ;;
-        V )
-            version
-            ;;
-        \? )
-            echo "Invalid option: $OPTARG" 1>&2
-            usage
-            ;;
-        : )
-            echo "Invalid option: $OPTARG requires an argument" 1>&2
-            usage
-            ;;
+while [[ $# -gt 0 ]]; do
+    case $1 in
+    -o)
+        output_file="$2"
+        shift 2
+        ;;
+    -j)
+        json_output_file="$2"
+        shift 2
+        ;;
+    -s)
+        max_file_size="$2"
+        shift 2
+        ;;
+    -e)
+        exclude_dirs+=("$2")
+        shift 2
+        ;;
+    -x)
+        exclude_extensions+=("$2")
+        shift 2
+        ;;
+    -v)
+        verbose=true
+        shift
+        ;;
+    -h)
+        usage
+        ;;
+    -V)
+        version
+        ;;
+    --gitignore)
+        respect_gitignore=true
+        shift
+        ;;
+    --tokens)
+        calculate_tokens=true
+        shift
+        ;;
+    *)
+        echo "Unknown option: $1" >&2
+        usage
+        ;;
     esac
 done
-shift $((OPTIND -1))
 
 full_output_path="$(pwd)/$output_file"
 
@@ -74,11 +97,11 @@ log() {
 
 # Function to check for required tools
 check_required_tools() {
-    local tools=("tree" "pandoc" "pdftotext" "jq" "highlight" "exiftool")
+    local tools=("tree" "pandoc" "pdftotext" "jq" "highlight" "exiftool" "git")
     local missing_tools=()
 
     for tool in "${tools[@]}"; do
-        if ! command -v "$tool" &> /dev/null; then
+        if ! command -v "$tool" &>/dev/null; then
             missing_tools+=("$tool")
         fi
     done
@@ -94,8 +117,12 @@ check_required_tools() {
 # Generate ASCII representation of the folder structure
 generate_tree() {
     log "Generating directory tree..."
-    tree -a -I "$output_file" > "$output_file"
-    echo -e "\n\n" >> "$output_file"
+    if [ "$respect_gitignore" = true ]; then
+        git ls-files | tree --fromfile -a -I "$output_file" >"$output_file"
+    else
+        tree -a -I "$output_file" >"$output_file"
+    fi
+    echo -e "\n\n" >>"$output_file"
 }
 
 # Function to process a single file
@@ -107,30 +134,64 @@ process_file() {
         return
     fi
 
+    # Check if file extension is excluded
+    local extension="${file##*.}"
+    if [[ " ${exclude_extensions[@]} " =~ " ${extension} " ]]; then
+        log "Skipping $file: extension $extension is excluded"
+        return
+    fi
+
     file_size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
     if [ "$file_size" -gt "$max_file_size" ]; then
         log "Skipping $file: file size ($file_size bytes) exceeds maximum ($max_file_size bytes)"
         return
     fi
 
-    log "Processing $file"
-    echo -e "## ${file}\n" >> "$output_file"
+    local mime_type
+    mime_type=$(file -b --mime-type "$file")
 
-    if file "$file" | grep -q text; then
-        echo -e "\`\`\`\n$(cat "$file")\n\`\`\`\n" >> "$output_file"
-    elif file "$file" | grep -qi pdf; then
-        echo -e "\`\`\`\n$(pdftotext "$file" -)\n\`\`\`\n" >> "$output_file"
-    elif file "$file" | grep -qi json; then
-        echo -e "\`\`\`json\n$(jq . "$file")\n\`\`\`\n" >> "$output_file"
-    elif file "$file" | grep -q 'script' || file "$file" | grep -q 'source'; then
-        echo -e "\`\`\`\n$(highlight -O ansi "$file")\n\`\`\`\n" >> "$output_file"
-    elif file "$file" | grep -qiE 'msword|openxmlformats'; then
-        echo -e "\`\`\`\n$(pandoc "$file" -t markdown)\n\`\`\`\n" >> "$output_file"
-    elif file "$file" | grep -qiE 'image|bitmap'; then
-        echo -e "\`\`\`\n$(exiftool "$file")\n\`\`\`\n" >> "$output_file"
-    else
-        log "Skipping unsupported file type: $file"
+    log "Processing $file (MIME type: $mime_type)"
+    echo -e "## ${file}\n" >>"$output_file"
+
+    case "$mime_type" in
+    text/* | application/json | application/javascript | application/x-javascript | application/typescript)
+        echo -e "\`\`\`\n$(cat "$file")\n\`\`\`\n" >>"$output_file"
+        ;;
+    application/pdf)
+        echo -e "\`\`\`\n$(pdftotext "$file" -)\n\`\`\`\n" >>"$output_file"
+        ;;
+    application/x-shellscript | application/x-php)
+        echo -e "\`\`\`\n$(highlight -O ansi "$file")\n\`\`\`\n" >>"$output_file"
+        ;;
+    application/msword | application/vnd.openxmlformats-officedocument.wordprocessingml.document)
+        echo -e "\`\`\`\n$(pandoc "$file" -t markdown)\n\`\`\`\n" >>"$output_file"
+        ;;
+    image/*)
+        echo -e "Image file: $file\n\`\`\`\n$(exiftool "$file")\n\`\`\`\n" >>"$output_file"
+        ;;
+    application/octet-stream | inode/x-empty)
+        log "Skipping binary or empty file: $file"
+        ;;
+    *)
+        log "Unsupported file type ($mime_type): $file"
+        echo -e "Unsupported file type: $file (MIME type: $mime_type)\n" >>"$output_file"
+        ;;
+    esac
+}
+
+# Function to check if a file should be ignored based on all .gitignore files
+should_ignore() {
+    local file="$1"
+
+    if [ "$respect_gitignore" = false ]; then
+        return 1
     fi
+
+    if git check-ignore -q "$file" 2>/dev/null; then
+        return 0
+    fi
+
+    return 1
 }
 
 # Function to check if a directory should be excluded
@@ -175,17 +236,43 @@ process_files() {
 
     processed_dirs+=("$real_path")
 
-    for item in "$current_dir"/*; do
-        if [ -d "$item" ]; then
-            if [ -L "$item" ]; then
-                log "Skipping symlinked directory: $item"
-            else
-                process_files "$item"
+    if [ "$respect_gitignore" = true ]; then
+        while IFS= read -r file; do
+            if [ -f "$file" ]; then
+                process_file "$file"
+            elif [ -d "$file" ]; then
+                process_files "$file"
             fi
-        elif [ -f "$item" ]; then
-            process_file "$item"
-        fi
-    done
+        done < <(git ls-files "$current_dir")
+    else
+        while IFS= read -r -d '' file; do
+            if [ -d "$file" ]; then
+                if [ -L "$file" ]; then
+                    log "Skipping symlinked directory: $file"
+                else
+                    process_files "$file"
+                fi
+            elif [ -f "$file" ]; then
+                process_file "$file"
+            fi
+        done < <(find "$current_dir" -maxdepth 1 -print0)
+    fi
+}
+
+# Function to calculate tokens
+calculate_tokens() {
+    local file="$1"
+    local word_count=$(wc -w <"$file")
+    local estimated_tokens=$((word_count * 4 / 3))
+    echo "Estimated token count: $estimated_tokens"
+}
+
+# Function to generate JSON output
+generate_json() {
+    local md_file="$1"
+    local json_file="$2"
+    jq -n --arg content "$(cat "$md_file")" '{"content": $content}' >"$json_file"
+    echo "JSON output generated: $json_file"
 }
 
 # Main execution
@@ -194,6 +281,14 @@ main() {
     generate_tree
     process_files "."
     echo "Done! Combined output is in $output_file"
+
+    if [ "$calculate_tokens" = true ]; then
+        calculate_tokens "$output_file"
+    fi
+
+    if [ -n "$json_output_file" ]; then
+        generate_json "$output_file" "$json_output_file"
+    fi
 }
 
 main
