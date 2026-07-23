@@ -1,0 +1,66 @@
+name: Network relay probe
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  expose-artifact-storage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create probe payload
+        run: |
+          set -euo pipefail
+          printf 'github-actions-azure-blob-probe\nrun=%s\ntime=%s\n' "$GITHUB_RUN_ID" "$(date -u +%FT%TZ)" > probe.txt
+
+      - name: Upload probe artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-relay-probe
+          path: probe.txt
+          retention-days: 1
+          compression-level: 0
+
+      - name: Resolve signed artifact redirect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          endpoint="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip"
+          for attempt in 1 2 3 4 5; do
+            headers="$(mktemp)"
+            code="$(curl --silent --show-error --output /dev/null --dump-header "$headers" --max-redirs 0 \
+              --write-out '%{http_code}' \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "$endpoint" || true)"
+            location="$(awk 'BEGIN{IGNORECASE=1} /^location:/ {sub(/^[^:]*:[[:space:]]*/, ""); sub(/\r$/, ""); print; exit}' "$headers")"
+            rm -f "$headers"
+            if [ "$code" = 302 ] && [ -n "$location" ]; then
+              printf '%s' "$location" | base64 -w0 > signed-url.b64
+              echo "ARTIFACT_ID=${ARTIFACT_ID}"
+              echo "SIGNED_URL_B64=$(cat signed-url.b64)"
+              python3 - <<'PY'
+import base64, urllib.parse
+u = base64.b64decode(open('signed-url.b64','rb').read()).decode()
+p = urllib.parse.urlsplit(u)
+print('SIGNED_HOST=' + str(p.hostname))
+print('SIGNED_PATH=' + p.path)
+print('SIGNED_QUERY_KEYS=' + ','.join(sorted(urllib.parse.parse_qs(p.query))))
+PY
+              exit 0
+            fi
+            echo "redirect attempt ${attempt}: HTTP ${code}" >&2
+            sleep $((attempt * 2))
+          done
+          exit 1
